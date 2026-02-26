@@ -1,0 +1,597 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Zombie Wave Survival</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #111; overflow: hidden; font-family: Arial, sans-serif; touch-action: none; }
+  canvas { display: block; }
+
+  /* HUD - верхняя панель */
+  #hud {
+    position: fixed; top: 0; left: 0; width: 100%;
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 8px 12px; background: rgba(0,0,0,0.7);
+    color: #fff; font-size: 16px; z-index: 10;
+  }
+  #hud .hp { color: #f44; }
+  #hud .wave { color: #fa0; }
+  #hud .kills { color: #4f4; }
+
+  /* Кнопка mute */
+  #muteBtn {
+    position: fixed; top: 8px; right: 12px;
+    background: rgba(255,255,255,0.15); border: none;
+    color: #fff; font-size: 20px; padding: 4px 10px;
+    border-radius: 8px; cursor: pointer; z-index: 20;
+  }
+
+  /* Экран старта / конца */
+  #screen {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.85);
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    color: #fff; z-index: 30;
+  }
+  #screen h1 { font-size: 36px; color: #f44; text-shadow: 0 0 20px #f00; margin-bottom: 16px; }
+  #screen p { font-size: 18px; color: #aaa; margin-bottom: 8px; }
+  #screen button {
+    margin-top: 24px; padding: 14px 40px;
+    font-size: 20px; background: #c00; color: #fff;
+    border: none; border-radius: 12px; cursor: pointer;
+    box-shadow: 0 0 20px #f00;
+  }
+  #screen button:hover { background: #f00; }
+
+  /* Мобильные кнопки управления */
+  #controls {
+    position: fixed; bottom: 0; left: 0; width: 100%;
+    display: none; /* показывается только на телефоне */
+    z-index: 10; pointer-events: none;
+  }
+
+  /* Джойстик слева */
+  #joystickZone {
+    position: fixed; bottom: 20px; left: 20px;
+    width: 130px; height: 130px;
+    pointer-events: all;
+  }
+  #joystickBase {
+    width: 130px; height: 130px;
+    background: rgba(255,255,255,0.1);
+    border: 2px solid rgba(255,255,255,0.3);
+    border-radius: 50%;
+    position: relative;
+  }
+  #joystickKnob {
+    width: 55px; height: 55px;
+    background: rgba(255,255,255,0.4);
+    border-radius: 50%;
+    position: absolute;
+    top: 50%; left: 50%;
+    transform: translate(-50%, -50%);
+  }
+
+  /* Кнопка стрельбы справа */
+  #shootBtn {
+    position: fixed; bottom: 30px; right: 30px;
+    width: 80px; height: 80px;
+    background: rgba(200,0,0,0.7);
+    border: 3px solid #f44;
+    border-radius: 50%;
+    font-size: 30px;
+    display: flex; align-items: center; justify-content: center;
+    pointer-events: all; user-select: none;
+  }
+
+  /* Кнопка паузы */
+  #pauseBtn {
+    position: fixed; bottom: 30px; right: 130px;
+    width: 55px; height: 55px;
+    background: rgba(255,255,255,0.15);
+    border: 2px solid rgba(255,255,255,0.4);
+    border-radius: 50%;
+    font-size: 22px;
+    display: flex; align-items: center; justify-content: center;
+    pointer-events: all; user-select: none; color: #fff;
+  }
+</style>
+</head>
+<body>
+
+<!-- Основной холст игры -->
+<canvas id="gameCanvas"></canvas>
+
+<!-- HUD (счёт, жизни, волна) -->
+<div id="hud">
+  <span class="hp">❤️ <span id="hpVal">100</span></span>
+  <span class="wave">🌊 Волна: <span id="waveVal">1</span></span>
+  <span class="kills">💀 <span id="killsVal">0</span></span>
+</div>
+
+<!-- Кнопка звука -->
+<button id="muteBtn">🔊</button>
+
+<!-- Экран старта -->
+<div id="screen">
+  <h1>🧟 ZOMBIE SURVIVAL</h1>
+  <p>Выживи как можно дольше!</p>
+  <p style="font-size:14px;color:#666;">ПК: WASD + мышь | Телефон: джойстик + кнопка</p>
+  <button id="startBtn">▶ ИГРАТЬ</button>
+</div>
+
+<!-- Мобильные кнопки -->
+<div id="controls">
+  <div id="joystickZone">
+    <div id="joystickBase">
+      <div id="joystickKnob"></div>
+    </div>
+  </div>
+  <div id="shootBtn">🔫</div>
+  <div id="pauseBtn">⏸</div>
+</div>
+
+<script>
+// ===== НАСТРОЙКИ ИГРЫ =====
+const PLAYER_SPEED = 3;
+const BULLET_SPEED = 7;
+const ZOMBIE_BASE_SPEED = 0.8;
+const ZOMBIE_HP = 3;
+const PLAYER_MAX_HP = 100;
+const ZOMBIE_DAMAGE = 10;
+const SHOOT_COOLDOWN = 300; // миллисекунд между выстрелами
+
+// ===== ЗВУКИ (генерируются через Web Audio API) =====
+let audioCtx = null;
+let muted = false;
+let audioStarted = false;
+
+// Инициализируем звук только после первого клика пользователя
+function initAudio() {
+  if (audioStarted) return;
+  audioStarted = true;
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+}
+
+// Воспроизвести простой звук выстрела
+function playShoot() {
+  if (muted || !audioCtx) return;
+  const osc = audioCtx.createOscillator();
+  const gain = audioCtx.createGain();
+  osc.connect(gain); gain.connect(audioCtx.destination);
+  osc.frequency.setValueAtTime(800, audioCtx.currentTime);
+  osc.frequency.exponentialRampToValueAtTime(200, audioCtx.currentTime + 0.1);
+  gain.gain.setValueAtTime(0.3, audioCtx.currentTime);
+  gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.1);
+  osc.start(); osc.stop(audioCtx.currentTime + 0.1);
+}
+
+// Воспроизвести звук удара по зомби
+function playHit() {
+  if (muted || !audioCtx) return;
+  const osc = audioCtx.createOscillator();
+  const gain = audioCtx.createGain();
+  osc.type = 'sawtooth';
+  osc.connect(gain); gain.connect(audioCtx.destination);
+  osc.frequency.setValueAtTime(150, audioCtx.currentTime);
+  gain.gain.setValueAtTime(0.2, audioCtx.currentTime);
+  gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.15);
+  osc.start(); osc.stop(audioCtx.currentTime + 0.15);
+}
+
+// Воспроизвести звук смерти игрока
+function playDeath() {
+  if (muted || !audioCtx) return;
+  const osc = audioCtx.createOscillator();
+  const gain = audioCtx.createGain();
+  osc.type = 'square';
+  osc.connect(gain); gain.connect(audioCtx.destination);
+  osc.frequency.setValueAtTime(400, audioCtx.currentTime);
+  osc.frequency.exponentialRampToValueAtTime(50, audioCtx.currentTime + 0.5);
+  gain.gain.setValueAtTime(0.4, audioCtx.currentTime);
+  gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.5);
+  osc.start(); osc.stop(audioCtx.currentTime + 0.5);
+}
+
+// ===== ХОЛСТ =====
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+
+// Подстраиваем размер холста под экран
+function resize() {
+  canvas.width = window.innerWidth;
+  canvas.height = window.innerHeight;
+}
+resize();
+window.addEventListener('resize', resize);
+
+// ===== СОСТОЯНИЕ ИГРЫ =====
+let gameRunning = false;
+let paused = false;
+let player, bullets, zombies, kills, wave, waveTimer, lastShot;
+let keys = {}; // нажатые клавиши
+let mouse = { x: 0, y: 0, shooting: false };
+let joystick = { dx: 0, dy: 0, active: false, startX: 0, startY: 0 };
+
+// ===== ИНИЦИАЛИЗАЦИЯ ИГРЫ =====
+function initGame() {
+  player = {
+    x: canvas.width / 2,
+    y: canvas.height / 2,
+    r: 18, // радиус
+    hp: PLAYER_MAX_HP,
+    angle: 0 // куда смотрит
+  };
+  bullets = [];
+  zombies = [];
+  kills = 0;
+  wave = 1;
+  waveTimer = 0;
+  lastShot = 0;
+  spawnWave();
+  updateHUD();
+}
+
+// ===== СПАВН ВОЛНЫ ЗОМБИ =====
+function spawnWave() {
+  const count = 5 + wave * 2; // с каждой волной зомби больше
+  for (let i = 0; i < count; i++) {
+    spawnZombie();
+  }
+}
+
+// Создаём одного зомби на краю экрана
+function spawnZombie() {
+  const side = Math.floor(Math.random() * 4);
+  let x, y;
+  if (side === 0) { x = Math.random() * canvas.width; y = -30; }
+  else if (side === 1) { x = canvas.width + 30; y = Math.random() * canvas.height; }
+  else if (side === 2) { x = Math.random() * canvas.width; y = canvas.height + 30; }
+  else { x = -30; y = Math.random() * canvas.height; }
+
+  zombies.push({
+    x, y,
+    r: 16,
+    hp: ZOMBIE_HP + Math.floor(wave / 2), // зомби крепче с каждой волной
+    speed: ZOMBIE_BASE_SPEED + wave * 0.05,
+    flashTimer: 0 // мигание при попадании
+  });
+}
+
+// ===== ВЫСТРЕЛ =====
+function shoot(targetX, targetY) {
+  const now = Date.now();
+  if (now - lastShot < SHOOT_COOLDOWN) return;
+  lastShot = now;
+
+  // Вычисляем угол к цели
+  const angle = Math.atan2(targetY - player.y, targetX - player.x);
+  bullets.push({
+    x: player.x,
+    y: player.y,
+    vx: Math.cos(angle) * BULLET_SPEED,
+    vy: Math.sin(angle) * BULLET_SPEED,
+    r: 5
+  });
+  playShoot();
+}
+
+// ===== ОБНОВЛЕНИЕ ИГРЫ (каждый кадр) =====
+function update() {
+  if (!gameRunning || paused) return;
+
+  // --- Движение игрока ---
+  let dx = 0, dy = 0;
+
+  // Клавиатура WASD или стрелки
+  if (keys['w'] || keys['arrowup'])    dy -= PLAYER_SPEED;
+  if (keys['s'] || keys['arrowdown'])  dy += PLAYER_SPEED;
+  if (keys['a'] || keys['arrowleft'])  dx -= PLAYER_SPEED;
+  if (keys['d'] || keys['arrowright']) dx += PLAYER_SPEED;
+
+  // Джойстик (мобильный)
+  if (joystick.active) {
+    dx += joystick.dx * PLAYER_SPEED;
+    dy += joystick.dy * PLAYER_SPEED;
+  }
+
+  // Нормализуем диагональное движение
+  if (dx !== 0 && dy !== 0) { dx *= 0.707; dy *= 0.707; }
+
+  // Двигаем игрока, не выходя за экран
+  player.x = Math.max(player.r, Math.min(canvas.width - player.r, player.x + dx));
+  player.y = Math.max(player.r, Math.min(canvas.height - player.r, player.y + dy));
+
+  // Угол поворота игрока к мыши
+  player.angle = Math.atan2(mouse.y - player.y, mouse.x - player.x);
+
+  // Стрельба по мыши (ПК)
+  if (mouse.shooting) {
+    shoot(mouse.x, mouse.y);
+  }
+
+  // --- Движение пуль ---
+  for (let i = bullets.length - 1; i >= 0; i--) {
+    const b = bullets[i];
+    b.x += b.vx;
+    b.y += b.vy;
+
+    // Удаляем пулю если вышла за экран
+    if (b.x < 0 || b.x > canvas.width || b.y < 0 || b.y > canvas.height) {
+      bullets.splice(i, 1);
+      continue;
+    }
+
+    // Проверяем попадание в зомби
+    let hit = false;
+    for (let j = zombies.length - 1; j >= 0; j--) {
+      const z = zombies[j];
+      const dist = Math.hypot(b.x - z.x, b.y - z.y);
+      if (dist < b.r + z.r) {
+        z.hp--;
+        z.flashTimer = 5; // мигание
+        playHit();
+        bullets.splice(i, 1);
+        hit = true;
+        if (z.hp <= 0) {
+          zombies.splice(j, 1);
+          kills++;
+          updateHUD();
+        }
+        break;
+      }
+    }
+  }
+
+  // --- Движение зомби к игроку ---
+  for (let i = zombies.length - 1; i >= 0; i--) {
+    const z = zombies[i];
+    if (z.flashTimer > 0) z.flashTimer--;
+
+    const angle = Math.atan2(player.y - z.y, player.x - z.x);
+    z.x += Math.cos(angle) * z.speed;
+    z.y += Math.sin(angle) * z.speed;
+
+    // Зомби касается игрока — урон
+    const dist = Math.hypot(z.x - player.x, z.y - player.y);
+    if (dist < z.r + player.r) {
+      player.hp -= ZOMBIE_DAMAGE * 0.016; // урон за кадр
+      updateHUD();
+      if (player.hp <= 0) {
+        gameOver();
+        return;
+      }
+    }
+  }
+
+  // --- Следующая волна когда убиты все зомби ---
+  if (zombies.length === 0) {
+    waveTimer++;
+    if (waveTimer > 120) { // 2 секунды паузы
+      wave++;
+      waveTimer = 0;
+      spawnWave();
+      updateHUD();
+    }
+  }
+}
+
+// ===== ОТРИСОВКА =====
+function draw() {
+  // Фон — тёмная трава
+  ctx.fillStyle = '#1a2a1a';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  // Сетка на фоне
+  ctx.strokeStyle = 'rgba(255,255,255,0.04)';
+  ctx.lineWidth = 1;
+  for (let x = 0; x < canvas.width; x += 40) {
+    ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, canvas.height); ctx.stroke();
+  }
+  for (let y = 0; y < canvas.height; y += 40) {
+    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(canvas.width, y); ctx.stroke();
+  }
+
+  if (!gameRunning) return;
+
+  // --- Рисуем пули ---
+  ctx.fillStyle = '#ff0';
+  for (const b of bullets) {
+    ctx.beginPath();
+    ctx.arc(b.x, b.y, b.r, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // --- Рисуем зомби ---
+  for (const z of zombies) {
+    // Тело зомби
+    ctx.fillStyle = z.flashTimer > 0 ? '#fff' : '#4a8a4a';
+    ctx.beginPath();
+    ctx.arc(z.x, z.y, z.r, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Глаза зомби
+    ctx.fillStyle = '#f00';
+    ctx.beginPath();
+    ctx.arc(z.x - 5, z.y - 4, 4, 0, Math.PI * 2);
+    ctx.arc(z.x + 5, z.y - 4, 4, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Полоска здоровья над зомби
+    const maxHp = ZOMBIE_HP + Math.floor(wave / 2);
+    const hpRatio = z.hp / maxHp;
+    ctx.fillStyle = '#333';
+    ctx.fillRect(z.x - z.r, z.y - z.r - 8, z.r * 2, 4);
+    ctx.fillStyle = hpRatio > 0.5 ? '#4f4' : '#f84';
+    ctx.fillRect(z.x - z.r, z.y - z.r - 8, z.r * 2 * hpRatio, 4);
+  }
+
+  // --- Рисуем игрока ---
+  ctx.save();
+  ctx.translate(player.x, player.y);
+  ctx.rotate(player.angle);
+
+  // Тело
+  ctx.fillStyle = '#4af';
+  ctx.beginPath();
+  ctx.arc(0, 0, player.r, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Ствол пушки
+  ctx.fillStyle = '#89c';
+  ctx.fillRect(0, -5, player.r + 8, 10);
+
+  ctx.restore();
+
+  // Надпись "Следующая волна"
+  if (zombies.length === 0 && gameRunning) {
+    ctx.fillStyle = 'rgba(255,200,0,0.8)';
+    ctx.font = 'bold 28px Arial';
+    ctx.textAlign = 'center';
+    ctx.fillText('🌊 Следующая волна...', canvas.width / 2, canvas.height / 2);
+  }
+}
+
+// ===== ИГРОВОЙ ЦИКЛ =====
+function gameLoop() {
+  update();
+  draw();
+  requestAnimationFrame(gameLoop);
+}
+
+// ===== ОБНОВЛЕНИЕ HUD =====
+function updateHUD() {
+  document.getElementById('hpVal').textContent = Math.max(0, Math.round(player.hp));
+  document.getElementById('waveVal').textContent = wave;
+  document.getElementById('killsVal').textContent = kills;
+}
+
+// ===== КОНЕЦ ИГРЫ =====
+function gameOver() {
+  gameRunning = false;
+  playDeath();
+  const screen = document.getElementById('screen');
+  screen.innerHTML = `
+    <h1>💀 ВЫ ПОГИБЛИ</h1>
+    <p>Волна: ${wave}</p>
+    <p>Убито зомби: ${kills}</p>
+    <button id="startBtn">🔄 ЗАНОВО</button>
+  `;
+  screen.style.display = 'flex';
+  document.getElementById('startBtn').addEventListener('click', startGame);
+}
+
+// ===== СТАРТ ИГРЫ =====
+function startGame() {
+  initAudio();
+  document.getElementById('screen').style.display = 'none';
+  gameRunning = true;
+  paused = false;
+  initGame();
+  // Показываем мобильные кнопки на телефоне
+  if ('ontouchstart' in window) {
+    document.getElementById('controls').style.display = 'block';
+    document.getElementById('joystickZone').style.display = 'block';
+    document.getElementById('shootBtn').style.display = 'flex';
+    document.getElementById('pauseBtn').style.display = 'flex';
+  }
+}
+
+// ===== УПРАВЛЕНИЕ КЛАВИАТУРОЙ =====
+document.addEventListener('keydown', e => {
+  keys[e.key.toLowerCase()] = true;
+});
+document.addEventListener('keyup', e => {
+  keys[e.key.toLowerCase()] = false;
+});
+
+// ===== УПРАВЛЕНИЕ МЫШЬЮ =====
+canvas.addEventListener('mousemove', e => {
+  mouse.x = e.clientX;
+  mouse.y = e.clientY;
+});
+canvas.addEventListener('mousedown', e => {
+  initAudio();
+  if (e.button === 0) mouse.shooting = true;
+});
+canvas.addEventListener('mouseup', e => {
+  if (e.button === 0) mouse.shooting = false;
+});
+
+// ===== МОБИЛЬНЫЙ ДЖОЙСТИК =====
+const joystickZone = document.getElementById('joystickZone');
+const joystickKnob = document.getElementById('joystickKnob');
+const maxDist = 40; // максимальный сдвиг ручки
+
+joystickZone.addEventListener('touchstart', e => {
+  e.preventDefault();
+  const t = e.touches[0];
+  const rect = joystickZone.getBoundingClientRect();
+  joystick.startX = rect.left + rect.width / 2;
+  joystick.startY = rect.top + rect.height / 2;
+  joystick.active = true;
+}, { passive: false });
+
+joystickZone.addEventListener('touchmove', e => {
+  e.preventDefault();
+  const t = e.touches[0];
+  let dx = t.clientX - joystick.startX;
+  let dy = t.clientY - joystick.startY;
+  const dist = Math.hypot(dx, dy);
+  if (dist > maxDist) { dx = dx/dist*maxDist; dy = dy/dist*maxDist; }
+  joystick.dx = dx / maxDist;
+  joystick.dy = dy / maxDist;
+  // Двигаем ручку джойстика визуально
+  joystickKnob.style.transform = `translate(calc(-50% + ${dx}px), calc(-50% + ${dy}px))`;
+}, { passive: false });
+
+joystickZone.addEventListener('touchend', e => {
+  e.preventDefault();
+  joystick.active = false;
+  joystick.dx = 0; joystick.dy = 0;
+  joystickKnob.style.transform = 'translate(-50%, -50%)';
+}, { passive: false });
+
+// ===== КНОПКА СТРЕЛЬБЫ (мобильная) =====
+const shootBtn = document.getElementById('shootBtn');
+let mobileShooting = false;
+shootBtn.addEventListener('touchstart', e => {
+  e.preventDefault();
+  mobileShooting = true;
+  // Стреляем в случайном направлении вокруг игрока (автоприцел к ближайшему зомби)
+  function mobileShootLoop() {
+    if (!mobileShooting) return;
+    let target = { x: player.x + Math.cos(player.angle)*100, y: player.y + Math.sin(player.angle)*100 };
+    // Автоприцел к ближайшему зомби
+    let minDist = Infinity;
+    for (const z of zombies) {
+      const d = Math.hypot(z.x - player.x, z.y - player.y);
+      if (d < minDist) { minDist = d; target = z; }
+    }
+    shoot(target.x, target.y);
+    setTimeout(mobileShootLoop, SHOOT_COOLDOWN);
+  }
+  mobileShootLoop();
+}, { passive: false });
+shootBtn.addEventListener('touchend', e => { e.preventDefault(); mobileShooting = false; }, { passive: false });
+
+// ===== КНОПКА ПАУЗЫ =====
+document.getElementById('pauseBtn').addEventListener('click', () => {
+  paused = !paused;
+  document.getElementById('pauseBtn').textContent = paused ? '▶' : '⏸';
+});
+
+// ===== КНОПКА MUTE =====
+document.getElementById('muteBtn').addEventListener('click', () => {
+  muted = !muted;
+  document.getElementById('muteBtn').textContent = muted ? '🔇' : '🔊';
+});
+
+// ===== СТАРТ =====
+document.getElementById('startBtn').addEventListener('click', startGame);
+gameLoop(); // запускаем игровой цикл сразу (фон рисуется)
+</script>
+</body>
+</html>
